@@ -1,0 +1,97 @@
+name: Build OnePlus 15 kernel (USER_NS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: "Branch of OnePlusOSS/kernel_manifest (CHECK this exists for sm8850)"
+        default: "oneplus/sm8850"
+      manifest_file:
+        description: "Manifest XML in that branch (CHECK the exact name)"
+        default: "oneplus_15.xml"
+      platform:
+        description: "Platform name passed to oplus_build_kernel.sh (e.g. canoe; CHECK)"
+        default: "canoe"
+      fork_repo:
+        description: "Your kernel fork (owner/name)"
+        default: "YOUR_USER/android_kernel_common_oneplus_sm8850"
+      fork_branch:
+        description: "Branch in your fork"
+        default: "oneplus/sm8850_b_16.0.0_oneplus_15"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl python3 build-essential bc bison flex \
+            libssl-dev libelf-dev libncurses-dev zip unzip rsync cpio lz4 xz-utils \
+            zstd libxml2-utils
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+          git config --global color.ui false
+
+      - name: Sync OnePlus kernel platform
+        run: |
+          mkdir -p ~/kernel && cd ~/kernel
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest \
+            -b "${{ inputs.manifest_branch }}" -m "${{ inputs.manifest_file }}" \
+            --depth=1
+          repo sync -c -j4 --no-tags --no-clone-bundle --force-sync
+          du -sh ~/kernel || true
+
+      - name: Swap in your fork of the common kernel
+        run: |
+          cd ~/kernel/kernel_platform
+          rm -rf common
+          git clone --depth 1 -b "${{ inputs.fork_branch }}" \
+            "https://github.com/${{ inputs.fork_repo }}" common
+
+      - name: Enable user namespaces
+        run: |
+          cd ~/kernel/kernel_platform/common
+          echo "--- before ---"
+          grep -rn "USER_NS" arch/arm64/configs/ gki/ 2>/dev/null || true
+          for f in arch/arm64/configs/gki_defconfig; do
+            sed -i '/CONFIG_USER_NS[= ]/d; /# CONFIG_USER_NS is not set/d' "$f"
+            echo "CONFIG_USER_NS=y" >> "$f"
+          done
+          echo "--- after ---"
+          grep -rn "USER_NS" arch/arm64/configs/ gki/ 2>/dev/null || true
+
+      - name: Build
+        run: |
+          cd ~/kernel
+          ./kernel_platform/oplus/build/oplus_build_kernel.sh "${{ inputs.platform }}" gki
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          mkdir -p ~/out
+          find ~/kernel -path '*/out/*' \( -name 'Image*' -o -name 'boot*.img' \
+            -o -name 'vendor_boot*.img' -o -name 'vendor_dlkm*.img' \
+            -o -name 'system_dlkm*' -o -name '.config' \) -type f \
+            -exec cp --parents {} ~/out/ \; 2>/dev/null || true
+          find ~/out -type f | head -50
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-out
+          path: ~/out
+          if-no-files-found: warn
