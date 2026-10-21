@@ -58,17 +58,18 @@ jobs:
           mkdir -p .repo/local_manifests
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
-          skip_paths = {
-              "kernel_platform/prebuilts/asuite",
-              "kernel_platform/tools/tradefederation/prebuilts",
-          }
+          BAD_REV = "ks-kernel.lnx.5.0.r3-rel"
+          KEYWORDS = ("asuite", "tradefed")
           root = ET.parse("/tmp/full_manifest.xml").getroot()
           out = ET.Element("manifest")
           for p in root.iter("project"):
-              path = p.get("path") or p.get("name")
-              if path in skip_paths:
-                  print("removing", p.get("name"), path)
-                  ET.SubElement(out, "remove-project", name=p.get("name"))
+              name = p.get("name") or ""
+              path = p.get("path") or name
+              rev = p.get("revision") or ""
+              if (rev == BAD_REV
+                      or any(k in name or k in path for k in KEYWORDS)):
+                  print("removing", name, "->", path, rev)
+                  ET.SubElement(out, "remove-project", name=name)
           ET.ElementTree(out).write(".repo/local_manifests/skip.xml")
           PY
 
@@ -92,10 +93,13 @@ jobs:
           cd ~/kernel/kernel_platform/common
           echo "--- before ---"
           grep -rn "USER_NS" arch/arm64/configs/ gki/ 2>/dev/null || true
-          for f in arch/arm64/configs/gki_defconfig; do
-            sed -i '/CONFIG_USER_NS[= ]/d; /# CONFIG_USER_NS is not set/d' "$f"
-            echo "CONFIG_USER_NS=y" >> "$f"
-          done
+          f=arch/arm64/configs/gki_defconfig
+          # Kleaf requires the defconfig in canonical savedefconfig order:
+          # CONFIG_USER_NS goes right after CONFIG_NAMESPACES, and PID_NS
+          # (default y) is enabled by deleting its "is not set" line.
+          sed -i '/CONFIG_USER_NS[= ]/d; /# CONFIG_USER_NS is not set/d' "$f"
+          sed -i '/# CONFIG_PID_NS is not set/d' "$f"
+          sed -i '/^CONFIG_NAMESPACES=y$/a CONFIG_USER_NS=y' "$f"
           echo "--- after ---"
           grep -rn "USER_NS" arch/arm64/configs/ gki/ 2>/dev/null || true
 
@@ -119,5 +123,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-out
-          path: ~/out
+          path: /home/runner/out
           if-no-files-found: warn
