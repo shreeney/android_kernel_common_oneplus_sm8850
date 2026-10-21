@@ -51,7 +51,33 @@ jobs:
           repo init -u https://github.com/OnePlusOSS/kernel_manifest \
             -b "${{ inputs.manifest_branch }}" -m "${{ inputs.manifest_file }}" \
             --depth=1
-          repo sync -c -j4 --no-tags --no-clone-bundle --force-sync
+
+          # Some test-tool prebuilts point at a branch that no longer exists
+          # upstream and are not needed to build a kernel. Drop them.
+          repo manifest -o /tmp/full_manifest.xml
+          mkdir -p .repo/local_manifests
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          skip_paths = {
+              "kernel_platform/prebuilts/asuite",
+              "kernel_platform/tools/tradefederation/prebuilts",
+          }
+          root = ET.parse("/tmp/full_manifest.xml").getroot()
+          out = ET.Element("manifest")
+          for p in root.iter("project"):
+              path = p.get("path") or p.get("name")
+              if path in skip_paths:
+                  print("removing", p.get("name"), path)
+                  ET.SubElement(out, "remove-project", name=p.get("name"))
+          ET.ElementTree(out).write(".repo/local_manifests/skip.xml")
+          PY
+
+          for i in 1 2 3; do
+            repo sync -c -j4 --no-tags --no-clone-bundle --force-sync \
+              --optimized-fetch && break
+            echo "sync attempt $i failed, retrying..."
+            sleep 20
+          done
           du -sh ~/kernel || true
 
       - name: Swap in your fork of the common kernel
